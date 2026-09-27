@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>USB Power Meter Dashboard</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>&gt;_</text></svg>">
+</head>
+<body>
+
+<div id="unsupported" class="banner hidden">
+  <strong id="unsupported-title"></strong>
+  <div id="unsupported-body"></div>
+  <div id="unsupported-diag" class="diag"></div>
+</div>
+
+<header class="toolbar">
+  <div class="group">
+    <button id="btn-connect" class="primary">Connect</button>
+    <button id="btn-disconnect" disabled>Disconnect</button>
+  </div>
+
+  <div class="group">
+    <label for="known-ports">Port</label>
+    <select id="known-ports" title="Ports this page has already been granted access to">
+      <option value="">pick on connect...</option>
+    </select>
+    <button id="btn-forget" title="Revoke access to the selected port" disabled>Forget</button>
+  </div>
+
+</header>
+
+<div class="workspace">
+
+  <section class="charts">
+    <div class="toolbar sub">
+      <div class="group">
+        <label for="chart-window">Window</label>
+        <select id="chart-window">
+          <option value="10000">10 s</option>
+          <option value="30000" selected>30 s</option>
+          <option value="60000">1 min</option>
+          <option value="300000">5 min</option>
+          <option value="900000">15 min</option>
+          <option value="0">all</option>
+          <option value="custom">custom</option>
+        </select>
+        <button id="btn-live" class="hidden" title="Resume following live data (or double-click a chart)">Live</button>
+      </div>
+
+      <div class="group checks">
+        <label><input type="checkbox" id="chart-zero"> Y from zero</label>
+        <label><input type="checkbox" id="opt-echo"> Echo samples in terminal</label>
+        <label title="Sends 'acc' once a second and reads the INA228 hardware accumulators. Poll traffic is kept out of the log."><input type="checkbox" id="opt-acc" checked> Poll acc (1 s)</label>
+      </div>
+
+      <div class="group">
+        <button id="btn-clear-charts">Clear charts</button>
+        <button id="btn-save-csv">Export CSV</button>
+      </div>
+    </div>
+
+    <div class="viewbar">
+      <span>window <b id="view-span">--</b></span>
+      <span title="Total capture held in the buffers; this is what the all window frames">history <b id="view-covered">--</b></span>
+      <span>samples <b id="view-samples">0</b></span>
+      <span>avg I <b id="view-avg-i">--</b></span>
+      <span title="Change across the visible range, from the INA228 accumulators">charge <b id="view-charge" class="hw">--</b> <i id="view-total-charge" class="hw"></i></span>
+      <span>avg P <b id="view-avg-p">--</b></span>
+      <span title="Change across the visible range, from the INA228 accumulators">energy <b id="view-energy" class="hw">--</b> <i id="view-total-energy" class="hw"></i></span>
+      <span class="hint">drag to zoom &middot; wheel &middot; shift+wheel or middle-drag to pan &middot; double-click for live</span>
+    </div>
+
+    <div id="chart-grid"></div>
+  </section>
+
+  <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"
+       tabindex="0" title="Drag to resize. Double-click to reset, arrow keys to nudge."></div>
+
+  <section class="terminal">
+    <div id="pane-control" class="controls"></div>
+
+    <div class="toolbar sub">
+      <div class="group">
+        <label for="mode">View</label>
+        <select id="mode">
+          <option value="text">Text</option>
+          <option value="hex">Hex dump</option>
+        </select>
+      </div>
+
+      <div class="group checks">
+        <label><input type="checkbox" id="opt-ts" checked> Time</label>
+        <label><input type="checkbox" id="opt-scroll" checked> Follow</label>
+        <label><input type="checkbox" id="opt-wrap"> Wrap</label>
+      </div>
+
+      <div class="group">
+        <label for="send-eol">EOL</label>
+        <select id="send-eol" title="Line ending sent with Enter">
+          <option value="\n">LF</option>
+          <option value="\r\n">CR+LF</option>
+          <option value="\r">CR</option>
+          <option value="">none</option>
+        </select>
+      </div>
+
+      <div class="group">
+        <button id="btn-pause">Pause</button>
+        <button id="btn-clear">Clear</button>
+        <button id="btn-save-txt">.txt</button>
+        <button id="btn-save-bin">.bin</button>
+      </div>
+    </div>
+
+    <!-- Type directly in here once connected: click to focus, the prompt line
+         lives at the bottom of the log. -->
+    <main id="output" tabindex="0"></main>
+  </section>
+
+</div>
+
+<div class="status">
+  <span id="stat-state" class="dot off">disconnected</span>
+  <span id="stat-port"></span>
+  <span>RX <b id="stat-rx">0</b> B</span>
+  <span>TX <b id="stat-tx">0</b> B</span>
+  <span>samples <b id="stat-samples">0</b></span>
+  <span title="Measured from arrival counts; the device declares no rate">rate <b id="stat-rate">--</b></span>
+  <span id="acc-backwards" class="hidden" title="The device reported an accumulator value lower than the one before it">acc went back <b id="acc-backwards-n">0</b>x</span>
+  <span id="stat-mangled" class="hidden" title="Measurement rows the device split in half, usually because a command reply landed mid-row">split rows <b id="stat-mangled-n">0</b></span>
+  <span id="stat-buf"></span>
+</div>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

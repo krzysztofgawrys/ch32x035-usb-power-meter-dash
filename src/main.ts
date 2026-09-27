@@ -1,0 +1,529 @@
+/** Wiring: DOM controls, serial session, sample extraction, terminal, charts. */
+
+import "./style.css";
+
+import { ChartPanel } from "./charts.js";
+import { commandSequence, streamEffect } from "./commands.js";
+import { ControlPanel } from "./control.js";
+import { Splitter } from "./splitter.js";
+import { SampleScanner } from "./parse.js";
+import { SerialSession, isSerialSupported, portLabel, type LogKind, type SerialConfig } from "./serial.js";
+import { TerminalView, type ViewMode } from "./terminal.js";
+
+const $ = <T extends HTMLElement>(id: string): T => {
+  const el = document.getElementById(id);
+  if (!el) throw new Error(`missing element #${id}`);
+  return el as T;
+};
+
+const el = {
+  output: $<HTMLElement>("output"),
+  paneControl: $<HTMLElement>("pane-control"),
+  splitter: $<HTMLElement>("splitter"),
+  connect: $<HTMLButtonElement>("btn-connect"),
+  disconnect: $<HTMLButtonElement>("btn-disconnect"),
+  knownPorts: $<HTMLSelectElement>("known-ports"),
+  forget: $<HTMLButtonElement>("btn-forget"),
+
+  chartGrid: $<HTMLElement>("chart-grid"),
+  chartWindow: $<HTMLSelectElement>("chart-window"),
+  chartZero: $<HTMLInputElement>("chart-zero"),
+  optEcho: $<HTMLInputElement>("opt-echo"),
+  optAcc: $<HTMLInputElement>("opt-acc"),
+  clearCharts: $<HTMLButtonElement>("btn-clear-charts"),
+  saveCsv: $<HTMLButtonElement>("btn-save-csv"),
+  liveBtn: $<HTMLButtonElement>("btn-live"),
+  viewSpan: $<HTMLElement>("view-span"),
+  viewCovered: $<HTMLElement>("view-covered"),
+  viewSamples: $<HTMLElement>("view-samples"),
+  viewAvgCurrent: $<HTMLElement>("view-avg-i"),
+  viewCharge: $<HTMLElement>("view-charge"),
+  viewAvgPower: $<HTMLElement>("view-avg-p"),
+  viewEnergy: $<HTMLElement>("view-energy"),
+  viewTotalCharge: $<HTMLElement>("view-total-charge"),
+  viewTotalEnergy: $<HTMLElement>("view-total-energy"),
+  accBackwards: $<HTMLElement>("acc-backwards"),
+  accBackwardsN: $<HTMLElement>("acc-backwards-n"),
+
+  mode: $<HTMLSelectElement>("mode"),
+  optTs: $<HTMLInputElement>("opt-ts"),
+  optScroll: $<HTMLInputElement>("opt-scroll"),
+  optWrap: $<HTMLInputElement>("opt-wrap"),
+  sendEol: $<HTMLSelectElement>("send-eol"),
+  pause: $<HTMLButtonElement>("btn-pause"),
+  clear: $<HTMLButtonElement>("btn-clear"),
+  saveTxt: $<HTMLButtonElement>("btn-save-txt"),
+  saveBin: $<HTMLButtonElement>("btn-save-bin"),
+
+  statState: $<HTMLElement>("stat-state"),
+  statPort: $<HTMLElement>("stat-port"),
+  statRx: $<HTMLElement>("stat-rx"),
+  statTx: $<HTMLElement>("stat-tx"),
+  statSamples: $<HTMLElement>("stat-samples"),
+  statRate: $<HTMLElement>("stat-rate"),
+  statMangled: $<HTMLElement>("stat-mangled"),
+  statMangledN: $<HTMLElement>("stat-mangled-n"),
+  statBuf: $<HTMLElement>("stat-buf"),
+  unsupported: $<HTMLElement>("unsupported"),
+};
+
+const term = new TerminalView(el.output);
+const control = new ControlPanel(el.paneControl);
+
+// The charts measure themselves with a ResizeObserver, so the divider only has
+// to change the width; the redraw follows on its own.
+new Splitter({
+  workspace: document.querySelector<HTMLElement>(".workspace")!,
+  handle: el.splitter,
+  storage: globalThis.localStorage,
+});
+
+const charts = new ChartPanel({
+  host: el.chartGrid,
+  windowSelect: el.chartWindow,
+  zeroCheck: el.chartZero,
+  countEl: el.statSamples,
+  liveBtn: el.liveBtn,
+  viewSpan: el.viewSpan,
+  viewCovered: el.viewCovered,
+  viewSamples: el.viewSamples,
+  viewAvgCurrent: el.viewAvgCurrent,
+  viewCharge: el.viewCharge,
+  viewAvgPower: el.viewAvgPower,
+  viewEnergy: el.viewEnergy,
+  viewTotalCharge: el.viewTotalCharge,
+  viewTotalEnergy: el.viewTotalEnergy,
+  accBackwards: el.accBackwards,
+  accBackwardsN: el.accBackwardsN,
+});
+
+/**
+ * Web Serial gives no product name, only USB ids. The device introduces itself
+ * on connect ("USBpm 1.0.199 - type 'help'"), so the first line it prints is a
+ * far better label than a hex pair - and it is the only real name available.
+ */
+let deviceName: string | null = null;
+let portLabelText = "";
+
+const scanner = new SampleScanner(
+  (t, v, i, p, s) => {
+    // Samples arriving is the ground truth for "the stream is running".
+    lastSampleAt = Date.now();
+    if (!streaming) setStreaming(true);
+    charts.add(t, v, i, p, s);
+  },
+  (t, acc) => {
+    charts.addAcc(t, acc.charge, acc.energy);
+  },
+  (line) => {
+    if (deviceName || !serial.isOpen) return;
+    const text = line.replace(/^[\s>]+/, "").trim();
+    // Skip a bare prompt or a command echo; take the first line with substance.
+    if (text.length < 3) return;
+    deviceName = text;
+    el.statPort.textContent = `${text}  (${portLabelText})`;
+  },
+);
+
+/**
+ * Polls the device's hardware accumulators.
+ *
+ * The app's own charge and energy are a sum over the samples that reached us;
+ * the INA228 integrates every conversion internally. Reading `acc` on a timer
+ * is the only way to see the exact figures without a firmware change, and the
+ * difference between two readings gives the true total for that interval.
+ */
+const ACC_POLL_MS = 1000;
+/** No samples for this long means the stream is not running, whatever we think. */
+const STREAM_IDLE_MS = 3000;
+
+let accTimer = 0;
+let streaming = false;
+let lastSampleAt = 0;
+
+/**
+ * Whether the device is streaming, which is also when its accumulators move:
+ * the firmware integrates only inside `if (usb_streaming)`, and `start` zeroes
+ * them. Polling `acc` outside that window asks a frozen counter the same
+ * question once a second and puts a command into the stream for nothing.
+ *
+ * Taken from the commands we send, with sample flow as the backstop - the
+ * device may already have been streaming when we connected, and we would never
+ * have seen the `start`.
+ */
+function setStreaming(on: boolean): void {
+  if (streaming === on) return;
+  streaming = on;
+  term.hideAccPolling = on && el.optAcc.checked;
+  if (!on && serial.isOpen && el.optAcc.checked) {
+    // `stop` freezes the accumulators, so one last read captures the exact
+    // session total rather than whatever the previous poll happened to catch.
+    // Deliberately not hidden: it lands right under the stop summary.
+    setTimeout(() => {
+      if (serial.isOpen) void serial.writeLine("acc", term.eol, true);
+    }, 250);
+  }
+}
+
+/** Notices `start` and `stop`, whichever tab they were sent from. */
+function noteCommand(text: string): void {
+  const effect = streamEffect(text);
+  if (effect) setStreaming(effect === "start");
+}
+
+function setAccPolling(on: boolean): void {
+  term.hideAccPolling = on && streaming;
+  clearInterval(accTimer);
+  accTimer = 0;
+  if (!on || !serial.isOpen) return;
+  accTimer = setInterval(() => {
+    if (lastSampleAt && Date.now() - lastSampleAt > STREAM_IDLE_MS) setStreaming(false);
+    if (streaming && serial.isOpen) void serial.writeLine("acc", term.eol, true);
+  }, ACC_POLL_MS) as unknown as number;
+}
+
+
+let rxBytes = 0;
+let knownPorts: SerialPort[] = [];
+let paused = false;
+
+const serial = new SerialSession({
+  onData(data) {
+    // performance.now() rather than Date.now(): sub-millisecond and monotonic.
+    // Whole-millisecond arrival times make every sample in a chunk collide,
+    // and in fast mode chunks can land several times per millisecond.
+    const t = performance.timeOrigin + performance.now();
+    rxBytes += data.length;
+    // Sample extraction runs here, not in the render path, so it keeps working
+    // while the terminal is paused or showing a hex dump, and so replaying the
+    // buffer on a view change cannot feed the charts twice.
+    scanner.feed(t, data);
+    term.push({ t, data });
+    scheduleStats();
+  },
+  onLog(text, kind) { term.sysLine(text, kind as LogKind); },
+  onConnected(label) {
+    scanner.reset();
+    deviceName = null;
+    portLabelText = label;
+    el.statPort.textContent = label;
+    term.sysLine(`--- connected: ${label} ---`);
+    setConnectedUI(true);
+    streaming = false;
+    lastSampleAt = 0;
+    setAccPolling(el.optAcc.checked);
+    // Both lines deasserted, which is exactly what the removed checkboxes did
+    // in their default state - the configuration this device is known to work
+    // with. Left explicit rather than inherited from the browser default,
+    // which the spec does not pin down. A device that needs DTR asserted to
+    // start talking would be fixed here.
+    void serial.setSignals(false, false);
+    void refreshPorts();
+  },
+  onDisconnected(reason) {
+    term.flush();
+    term.sysLine(`--- disconnected${reason ? " (" + reason + ")" : ""} ---`);
+    el.statPort.textContent = "";
+    deviceName = null;
+    setAccPolling(false);
+    streaming = false;
+    setConnectedUI(false);
+// The greeting line this replaced existed to prove which build was loaded,
+// back when stale caching was a live problem. Hashed asset names settled that,
+// so the build id lives here instead: visible on hover, absent from the log.
+document.querySelector(".status")?.setAttribute("title", `build ${__BUILD_ID__}`);
+  },
+  onPortsChanged() { void refreshPorts(); },
+});
+
+/* ------------------------------------------------------------------ */
+/* UI state                                                            */
+/* ------------------------------------------------------------------ */
+
+function setConnectedUI(on: boolean): void {
+  el.connect.disabled = on;
+  el.disconnect.disabled = !on;
+  el.knownPorts.disabled = on;
+  el.forget.disabled = on || !el.knownPorts.value;
+  el.statState.className = "dot " + (on ? "on" : "off");
+  el.statState.textContent = on ? "connected" : "disconnected";
+  term.setPromptEnabled(on);
+  control.setEnabled(on);
+}
+
+let statsFrame = 0;
+function scheduleStats(): void {
+  if (statsFrame) return;
+  statsFrame = requestAnimationFrame(() => {
+    statsFrame = 0;
+    el.statRx.textContent = rxBytes.toLocaleString("en-US");
+    el.statTx.textContent = serial.txBytes.toLocaleString("en-US");
+    const held = term.heldChunks;
+    el.statBuf.textContent = held ? `held: ${held} chunks` : "";
+    // Only appears once it happens, so a healthy session stays uncluttered.
+    const sps = scanner.samplesPerSecond;
+    // The tilde is the honest part: without device timestamps the reader has
+    // to assume an even spacing it cannot verify, so the figure describes the
+    // chunk arrivals rather than the acquisition.
+    const timed = scanner.deviceTimed;
+    el.statRate.textContent = sps > 0
+      ? `${timed ? "" : "~"}${Math.round(sps).toLocaleString("en-US")}/s`
+      : "--";
+    el.statRate.title = timed
+      ? "Sample times come from the device"
+      : "This firmware sends no timestamps; sample times are interpolated from chunk arrivals";
+    el.statMangled.classList.toggle("hidden", scanner.mangled === 0);
+    el.statMangledN.textContent = scanner.mangled.toLocaleString("en-US");
+  });
+}
+
+async function refreshPorts(): Promise<void> {
+  knownPorts = await serial.listPorts();
+  el.knownPorts.textContent = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = knownPorts.length ? "-- pick a remembered port --" : "no remembered ports";
+  el.knownPorts.appendChild(none);
+  knownPorts.forEach((port, idx) => {
+    const opt = document.createElement("option");
+    opt.value = String(idx);
+    opt.textContent = `${idx + 1}. ${portLabel(port)}`;
+    el.knownPorts.appendChild(opt);
+  });
+  el.forget.disabled = !el.knownPorts.value || serial.isOpen;
+}
+
+/**
+ * The device is USB CDC, where the line settings are nominal: the host sends
+ * them, the firmware ignores them, and nothing on the wire changes. They used
+ * to be editable, which only invited people to tune numbers that do nothing.
+ *
+ * `port.open()` still requires a baud rate, so one is supplied here. Bringing
+ * the controls back would mean restoring this object from the form; SerialConfig
+ * already carries every field.
+ */
+const CDC_CONFIG: SerialConfig = {
+  baudRate: 115200,
+  dataBits: 8,
+  stopBits: 1,
+  parity: "none",
+  flowControl: "none",
+};
+
+function download(blob: Blob, ext: string, prefix: string): void {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${prefix}-${stamp}.${ext}`;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+/* ------------------------------------------------------------------ */
+/* Controls                                                            */
+/* ------------------------------------------------------------------ */
+
+el.connect.addEventListener("click", () => {
+  const sel = el.knownPorts.value;
+  const preferred = sel !== "" ? (knownPorts[Number(sel)] ?? null) : null;
+  void serial.connect(preferred, CDC_CONFIG);
+});
+
+el.disconnect.addEventListener("click", () => void serial.disconnect("closed from the toolbar"));
+
+el.knownPorts.addEventListener("change", () => {
+  el.forget.disabled = !el.knownPorts.value || serial.isOpen;
+});
+
+el.forget.addEventListener("click", async () => {
+  const sel = el.knownPorts.value;
+  const port = sel !== "" ? knownPorts[Number(sel)] : undefined;
+  if (!port) return;
+  await port.forget();
+  await refreshPorts();
+  term.sysLine("--- port access revoked ---");
+});
+
+
+el.mode.addEventListener("change", () => term.setMode(el.mode.value as ViewMode));
+
+el.optTs.addEventListener("change", () => el.output.classList.toggle("no-ts", !el.optTs.checked));
+el.optWrap.addEventListener("change", () => el.output.classList.toggle("wrap", el.optWrap.checked));
+el.optScroll.addEventListener("change", () => { term.autoScroll = el.optScroll.checked; });
+el.sendEol.addEventListener("change", () => { term.eol = decodeEol(el.sendEol.value); });
+
+// Showing or hiding measurement lines only affects future lines, so redraw
+// the terminal from the raw buffer to apply it to what is already there.
+el.optAcc.addEventListener("change", () => setAccPolling(el.optAcc.checked));
+
+el.optEcho.addEventListener("change", () => {
+  term.echoSamples = el.optEcho.checked;
+  term.rerender();
+});
+
+// Scrolling up turns follow off; returning to the bottom turns it back on.
+el.output.addEventListener("scroll", () => {
+  const atBottom = el.output.scrollHeight - el.output.scrollTop - el.output.clientHeight < 4;
+  if (el.optScroll.checked !== atBottom) {
+    el.optScroll.checked = atBottom;
+    term.autoScroll = atBottom;
+  }
+});
+
+// Pause freezes the display only. Bytes keep arriving and samples keep landing
+// in the chart store; both catch up on resume.
+el.pause.addEventListener("click", () => {
+  paused = !paused;
+  term.paused = paused;
+  charts.setPaused(paused);
+  el.pause.classList.toggle("active", paused);
+  el.pause.textContent = paused ? "Resume" : "Pause";
+  el.statState.classList.toggle("paused", paused);
+  if (!paused) term.flush();
+  scheduleStats();
+});
+
+el.clear.addEventListener("click", () => {
+  rxBytes = 0;
+  term.clear();
+  scheduleStats();
+});
+
+el.clearCharts.addEventListener("click", () => charts.clear());
+
+el.saveTxt.addEventListener("click", () => {
+  download(new Blob([term.logText(el.optTs.checked)], { type: "text/plain;charset=utf-8" }),
+           "txt", "serial-log");
+});
+
+el.saveBin.addEventListener("click", () => {
+  download(new Blob([term.rawBytes()], { type: "application/octet-stream" }), "bin", "serial-log");
+});
+
+el.saveCsv.addEventListener("click", () => {
+  if (!charts.count) {
+    term.sysLine("No samples captured yet.", "err");
+    return;
+  }
+  download(charts.toCSVBlob(), "csv", "samples");
+  charts.markSaved();
+});
+
+/**
+ * Sends one user command, plus whatever has to bracket it - see
+ * commandSequence, which decides that and is where the reasoning lives.
+ *
+ * Awaited one at a time so the device's shell sees them in the order intended.
+ * Not quiet: the app is speaking on the user's behalf and should say so in the
+ * log, the same as any command typed by hand.
+ */
+async function sendCommand(text: string): Promise<void> {
+  if (streamEffect(text) === "start" && !beginCapture()) return;
+  noteCommand(text);
+  for (const line of commandSequence(text)) await serial.writeLine(line, term.eol);
+}
+
+/**
+ * Clears the charts for a new capture, asking first if that would throw
+ * anything away.
+ *
+ * `start` zeroes the device's accumulators and begins a new session, so
+ * leaving the previous one on the charts would draw two captures as one
+ * continuous trace with a meaningless gap between them - and the totals in the
+ * view bar would cover both. The old data has to go.
+ *
+ * It goes silently once it has been exported, and only then. Returns false if
+ * the user would rather keep it, in which case nothing is sent at all: better
+ * to leave the device alone than to start a capture the user just declined.
+ */
+function beginCapture(): boolean {
+  if (charts.unsaved) {
+    const n = charts.count.toLocaleString("en-US");
+    if (!confirm(`Starting a new capture discards ${n} samples that have not been saved.\n\n` +
+                 `Discard them?`)) {
+      term.sysLine("Start cancelled - save the CSV first, or clear the charts.", "err");
+      return false;
+    }
+  }
+  charts.clear();
+  return true;
+}
+
+term.onSubmit = (text) => void sendCommand(text);
+
+// Not quiet: the terminal is right below the buttons, so echoing the command
+// is what makes the pair read as a dialogue.
+control.onCommand = (command) => void sendCommand(command);
+
+
+term.onControl = (code, label) => void serial.writeByte(code, label);
+
+function decodeEol(raw: string): string {
+  return raw.replace(/\\r/g, "\r").replace(/\\n/g, "\n");
+}
+
+/* ------------------------------------------------------------------ */
+/* Startup                                                             */
+/* ------------------------------------------------------------------ */
+
+function isChromium(): boolean {
+  const ua = navigator.userAgent;
+  return /Chrome\/|Chromium\/|Edg\//.test(ua) && !/OPR\//.test(ua);
+}
+
+/**
+ * navigator.serial is exposed only in a secure context and only for a real
+ * origin. Distinguish the causes so the banner says what to actually fix.
+ */
+function showUnsupported(): void {
+  const title = $<HTMLElement>("unsupported-title");
+  const body = $<HTMLElement>("unsupported-body");
+
+  if (location.protocol === "file:") {
+    title.textContent = "Opened via file:// - Web Serial will not work.";
+    body.innerHTML =
+      " Browsers do not expose <code>navigator.serial</code> to files on disk." +
+      " The app has to be served over HTTP:" +
+      "<ol><li><code>docker compose up -d</code> in the app directory.</li>" +
+      "<li>Open <code>http://localhost:8080</code>.</li></ol>";
+  } else if (!window.isSecureContext) {
+    title.textContent = "Insecure context - Web Serial is unavailable.";
+    body.innerHTML =
+      " This origin is not trusted. Only <code>https://</code> and" +
+      " <code>http://localhost</code> / <code>127.0.0.1</code> qualify - plain" +
+      " <code>http://</code> to an IP address does not." +
+      " Use localhost, put TLS in front, or add this origin to" +
+      " <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>.";
+  } else if (!isChromium()) {
+    title.textContent = "This browser does not implement the Web Serial API.";
+    body.innerHTML = " Use Chrome or Edge 89+. Firefox and Safari do not ship this API.";
+  } else {
+    title.textContent = "Web Serial is disabled in this browser.";
+    body.innerHTML =
+      " The engine supports it but the API was not exposed. Usual causes:" +
+      " enterprise policy (<code>DefaultSerialGuardSetting</code> - check" +
+      " <code>chrome://policy</code>), guest mode, or a disabled" +
+      " <code>chrome://flags/#enable-experimental-web-platform-features</code>.";
+  }
+
+  $<HTMLElement>("unsupported-diag").textContent =
+    `origin: ${location.origin} | protocol: ${location.protocol}` +
+    ` | secureContext: ${window.isSecureContext} | chromium: ${isChromium()}`;
+
+  el.unsupported.classList.remove("hidden");
+}
+
+term.eol = decodeEol(el.sendEol.value);
+term.echoSamples = el.optEcho.checked;
+term.autoScroll = el.optScroll.checked;
+setConnectedUI(false);
+
+if (!isSerialSupported()) {
+  showUnsupported();
+  el.connect.disabled = true;
+} else {
+  void refreshPorts();
+  window.addEventListener("beforeunload", () => void serial.disconnect("page closing"));
+}
+
+scheduleStats();

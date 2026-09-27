@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.local
+.DS_Store
+
+# Captured sessions. These are measurement data, not source: the ones from
+# development alone come to 34 MB, and every new capture lands here.
+samples-*.csv

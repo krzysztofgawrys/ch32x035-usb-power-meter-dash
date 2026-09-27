@@ -1,0 +1,15 @@
+services:
+  term-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: term-app:latest
+    container_name: term-app
+    restart: unless-stopped
+    ports:
+      # Listen on every interface of the WSL host.
+      # From Windows use http://localhost:8080 - WSL2 forwards localhost into
+      # the distro and localhost is a secure context, so Web Serial works.
+      # http://<wsl-ip>:8080 loads the page but the browser will refuse
+      # serial access there (see README).
+      - "0.0.0.0:8080:8080"

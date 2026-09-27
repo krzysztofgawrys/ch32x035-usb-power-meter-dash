@@ -1,0 +1,62 @@
+# Builds the dashboard and publishes it to GitHub Pages.
+#
+# Manual only (workflow_dispatch): the app is deployed to a container on the
+# WSL host as well, and Pages is the copy that can be reached from anywhere.
+# Publishing on every push would make a half-finished commit the live one.
+#
+# Pages serves over https, which is a secure context, so Web Serial works from
+# the published copy. Plain http to an IP address does not - see the README.
+name: Deploy to GitHub Pages
+
+on:
+  workflow_dispatch:
+
+# Least privilege: read the code, mint an id-token for the Pages deployment,
+# and write nothing else.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deployment at a time, and never cancel one that is already publishing -
+# an interrupted deploy leaves the site on a mixed set of assets.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - run: npm ci
+
+      # Run before the build rather than after: a red test should stop the
+      # deployment, not accompany it. `npm run build` already typechecks.
+      - run: npm test
+
+      - run: npm run build
+
+      - uses: actions/configure-pages@v5
+
+      # vite.config.ts sets base "./", so the bundle works from a project
+      # subpath without knowing the repository name.
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
