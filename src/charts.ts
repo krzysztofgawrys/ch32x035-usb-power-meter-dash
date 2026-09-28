@@ -63,7 +63,17 @@ class ChartView {
 
   zeroBased = false;
 
-  constructor(private readonly metric: Metric, host: HTMLElement,
+  /** False while the chart is unmounted, hidden, or on an inactive tab. */
+  get laidOut(): boolean { return this.plotHost.clientHeight > 0; }
+
+  get key(): string { return this.metric.key; }
+
+  /**
+   * Builds the chart detached. The owner decides where `root` goes, because
+   * each chart now lives in its own dock panel and gets re-parented whenever
+   * the user drags it, floats it, or pops it into a separate window.
+   */
+  constructor(private readonly metric: Metric,
               private readonly gestures: Gestures, onResize: () => void) {
     const root = document.createElement("figure");
     root.className = "chart";
@@ -83,13 +93,17 @@ class ChartView {
     this.liveEl = root.querySelector<HTMLElement>(".chart-live")!;
     this.statsEl = root.querySelector<HTMLElement>(".chart-stats")!;
     this.plotHost = root.querySelector<HTMLElement>(".plot")!;
-    host.appendChild(root);
 
     this.plot = new uPlot(this.options(200, 100), [[], [], [], []] as AlignedData, this.plotHost);
 
     new ResizeObserver(() => {
-      const w = Math.max(50, Math.floor(this.plotHost.clientWidth));
-      const h = Math.max(40, Math.floor(this.plotHost.clientHeight));
+      const w = Math.floor(this.plotHost.clientWidth);
+      const h = Math.floor(this.plotHost.clientHeight);
+      // A panel that is hidden, on an inactive tab, or not yet mounted reports
+      // zero. Resizing uPlot to nothing wrecks its scales and it does not
+      // recover on its own, so wait: the observer fires again with real
+      // numbers the moment the panel is shown.
+      if (w < 1 || h < 1) return;
       this.plot.setSize({ width: w, height: h });
       onResize();
     }).observe(this.plotHost);
@@ -306,7 +320,6 @@ function fmtBelow(value: number, step: number, unit: string): string {
 }
 
 export interface ChartPanelElements {
-  host: HTMLElement;
   windowSelect: HTMLSelectElement;
   zeroCheck: HTMLInputElement;
   countEl: HTMLElement;
@@ -392,7 +405,7 @@ export class ChartPanel {
     };
 
     for (const metric of METRICS) {
-      this.views.push(new ChartView(metric, el.host, gestures, () => this.schedule()));
+      this.views.push(new ChartView(metric, gestures, () => this.schedule()));
     }
 
     this.preset = el.windowSelect.value || null;
@@ -442,6 +455,18 @@ export class ChartPanel {
   }
 
   get count(): number { return this.store.count; }
+
+  /**
+   * The chart's root element, for a dock panel to adopt.
+   *
+   * Handed out rather than appended by the panel itself, because the element
+   * outlives any one mount point: dragging a chart to another dock position,
+   * floating it, or popping it into a separate window all re-parent it, and
+   * rebuilding uPlot each time would drop the view and the cursor with it.
+   */
+  chartElement(key: string): HTMLElement | null {
+    return this.views.find((v) => v.key === key)?.root ?? null;
+  }
 
   markSaved(): void { this.saved = true; }
 
@@ -540,7 +565,9 @@ export class ChartPanel {
       this.frame = requestAnimationFrame((n) => this.tick(n));
       return;
     }
-    if (!this.el.host.clientHeight) return;   // not laid out; ResizeObserver will re-arm
+    // Nothing on screen: every chart is hidden, or none has been mounted yet.
+    // Each ChartView's ResizeObserver re-arms the draw when its panel appears.
+    if (!this.views.some((v) => v.laidOut)) return;
     this.lastDraw = now;
     this.dirty = false;
     this.render();

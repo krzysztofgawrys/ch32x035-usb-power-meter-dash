@@ -1,11 +1,15 @@
 /** Wiring: DOM controls, serial session, sample extraction, terminal, charts. */
 
+import "./dockview.css";
 import "./style.css";
 
 import { ChartPanel } from "./charts.js";
+import { METRICS } from "./store.js";
 import { commandSequence, streamEffect } from "./commands.js";
 import { ControlPanel } from "./control.js";
-import { Splitter } from "./splitter.js";
+import { confirmDialog } from "./dialog.js";
+import { DEFAULT_LAYOUT } from "./default-layout.js";
+import { Dock, type PanelSpec } from "./dock.js";
 import { SampleScanner } from "./parse.js";
 import { SerialSession, isSerialSupported, portLabel, type LogKind, type SerialConfig } from "./serial.js";
 import { TerminalView, type ViewMode } from "./terminal.js";
@@ -16,16 +20,53 @@ const $ = <T extends HTMLElement>(id: string): T => {
   return el as T;
 };
 
+/**
+ * Panel bodies live in <template> in the markup, so their ids stay declared in
+ * one place instead of being built in JavaScript. Cloning happens once, at
+ * startup, before anything looks those ids up - the dock only ever moves the
+ * resulting element around.
+ */
+/**
+ * Somewhere for a clone to wait until a panel adopts it.
+ *
+ * It has to be in the document, or getElementById cannot find the ids inside
+ * it. It must not be in the page flow: parked as plain children of <body>,
+ * which is a flex column, the four panel bodies took real space and the dock
+ * measured itself against what was left.
+ */
+const holding = document.createElement("div");
+holding.hidden = true;
+document.body.appendChild(holding);
+
+function fromTemplate(id: string): HTMLElement {
+  const tpl = document.getElementById(id);
+  if (!(tpl instanceof HTMLTemplateElement)) throw new Error(`missing template #${id}`);
+  const node = tpl.content.firstElementChild?.cloneNode(true);
+  if (!(node instanceof HTMLElement)) throw new Error(`empty template #${id}`);
+  holding.appendChild(node);
+  return node;
+}
+
+const panelBody = {
+  stats: fromTemplate("tpl-view"),
+  toolbar: fromTemplate("tpl-toolbar"),
+  connect: fromTemplate("tpl-connect"),
+  controls: fromTemplate("tpl-controls"),
+  terminal: fromTemplate("tpl-terminal"),
+};
+
 const el = {
   output: $<HTMLElement>("output"),
   paneControl: $<HTMLElement>("pane-control"),
-  splitter: $<HTMLElement>("splitter"),
+  dock: $<HTMLElement>("dock"),
+  viewMenuBtn: $<HTMLButtonElement>("btn-view-menu"),
+  viewMenuGroup: $<HTMLElement>("view-menu-group"),
+  resetLayout: $<HTMLButtonElement>("btn-reset-layout"),
   connect: $<HTMLButtonElement>("btn-connect"),
   disconnect: $<HTMLButtonElement>("btn-disconnect"),
   knownPorts: $<HTMLSelectElement>("known-ports"),
   forget: $<HTMLButtonElement>("btn-forget"),
 
-  chartGrid: $<HTMLElement>("chart-grid"),
   chartWindow: $<HTMLSelectElement>("chart-window"),
   chartZero: $<HTMLInputElement>("chart-zero"),
   optEcho: $<HTMLInputElement>("opt-echo"),
@@ -70,16 +111,7 @@ const el = {
 const term = new TerminalView(el.output);
 const control = new ControlPanel(el.paneControl);
 
-// The charts measure themselves with a ResizeObserver, so the divider only has
-// to change the width; the redraw follows on its own.
-new Splitter({
-  workspace: document.querySelector<HTMLElement>(".workspace")!,
-  handle: el.splitter,
-  storage: globalThis.localStorage,
-});
-
 const charts = new ChartPanel({
-  host: el.chartGrid,
   windowSelect: el.chartWindow,
   zeroCheck: el.chartZero,
   countEl: el.statSamples,
@@ -95,6 +127,163 @@ const charts = new ChartPanel({
   viewTotalEnergy: el.viewTotalEnergy,
   accBackwards: el.accBackwards,
   accBackwardsN: el.accBackwardsN,
+});
+
+/*
+ * Height of the one-line panels, tab bar included: an 18px compact header
+ * (see .dv-groupview:has in style.css) over 36px of content, which is what a
+ * 28px button with 4px padding needs.
+ *
+ * One number for all three rather than a snug fit each, because Statistics
+ * and Window share a row and a row has a single height - a 44px ceiling on
+ * one and 54px on the other is unsatisfiable, and what gives is the taller
+ * one's buttons. Statistics gains a few pixels of breathing room it does not
+ * need; that is the price of them sitting side by side.
+ *
+ * Minimum and maximum are pinned to the same number so a stray drag cannot
+ * turn one into a half-empty box. The header stays because it is the only
+ * thing dockview lets you drag a docked group by.
+ */
+const STRIP_HEIGHT = 54;
+
+/**
+ * The eight dockable panels.
+ *
+ * Every chart is its own panel rather than one "Charts" pane, which is the
+ * point of the exercise: any one of them can be given the whole width, tabbed
+ * behind another, or popped out onto a second monitor while the rest stay put.
+ */
+const PANELS: readonly PanelSpec[] = [
+  ...METRICS.map((m) => ({
+    id: m.key,
+    title: m.title,
+    element: charts.chartElement(m.key)!,
+  })),
+  { id: "stats", title: "Statistics", element: panelBody.stats, strip: true,
+    constraints: { minimumHeight: STRIP_HEIGHT, maximumHeight: STRIP_HEIGHT } },
+  // Not closable: it carries the Panels menu, so closing it would remove the
+  // only way to bring anything back.
+  { id: "toolbar", title: "Toolbar", element: panelBody.toolbar, strip: true,
+    closable: false,
+    constraints: { minimumHeight: STRIP_HEIGHT, maximumHeight: STRIP_HEIGHT } },
+  { id: "connect", title: "Connect", element: panelBody.connect, strip: true,
+    constraints: { minimumHeight: STRIP_HEIGHT, maximumHeight: STRIP_HEIGHT } },
+  { id: "controls", title: "Controls", element: panelBody.controls },
+  { id: "terminal", title: "Terminal", element: panelBody.terminal },
+];
+
+
+
+const dock = new Dock({
+  host: el.dock,
+  panels: PANELS,
+  storage: globalThis.localStorage,
+  defaultLayout: (api) => api.fromJSON(DEFAULT_LAYOUT),
+});
+
+/**
+ * Show/hide menu for the panels.
+ *
+ * Closing a panel destroys nothing - the element goes back to whoever owns it
+ * and returns intact - so this is genuinely a visibility control. It matters
+ * most for "View": that strip is the only place charge and energy appear, and
+ * without a way back a closed one would look like data loss.
+ */
+function buildViewMenu(): HTMLElement {
+  const menu = document.createElement("div");
+  menu.className = "view-menu hidden";
+
+  for (const spec of PANELS) {
+    const row = document.createElement("label");
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.dataset["panel"] = spec.id;
+    box.addEventListener("change", () => dock.toggle(spec.id));
+
+    // A panel that cannot be closed still gets a row - it belongs in the
+    // list - but the box is fixed on and says why.
+    if (!dock.closable(spec.id)) {
+      box.disabled = true;
+      row.title = `${spec.title} is always open`;
+    }
+
+    const name = document.createElement("span");
+    name.textContent = spec.title;
+
+    const pop = document.createElement("button");
+    pop.type = "button";
+    pop.className = "popout";
+    pop.textContent = "↗";
+    pop.title = `Open ${spec.title} in a separate window`;
+    pop.addEventListener("click", (e) => {
+      e.preventDefault();
+      void dock.popout(spec.id);
+    });
+
+    row.append(box, name, pop);
+    menu.appendChild(row);
+  }
+
+  /*
+   * Parked on <body>, not inside the toolbar.
+   *
+   * The toolbar is a 54px panel with its overflow clipped, so a dropdown
+   * anchored inside it would be cut off at the first row. Fixed positioning
+   * from the button's own rectangle escapes that, and escapes any transform
+   * dockview puts on the panel too.
+   */
+  document.body.appendChild(menu);
+  return menu;
+}
+
+const viewMenu = buildViewMenu();
+
+function syncViewMenu(): void {
+  for (const box of viewMenu.querySelectorAll<HTMLInputElement>("input[data-panel]")) {
+    box.checked = dock.isOpen(box.dataset["panel"]!);
+  }
+}
+
+dock.onVisibilityChange = syncViewMenu;
+syncViewMenu();
+
+function placeViewMenu(): void {
+  const r = el.viewMenuBtn.getBoundingClientRect();
+  viewMenu.style.top = `${Math.round(r.bottom + 4)}px`;
+  // Right-aligned to the button, nudged back inside if that would overflow.
+  const width = viewMenu.offsetWidth || 190;
+  viewMenu.style.left = `${Math.round(Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8)))}px`;
+}
+
+function setViewMenuOpen(open: boolean): void {
+  viewMenu.classList.toggle("hidden", !open);
+  el.viewMenuBtn.setAttribute("aria-expanded", String(open));
+  if (!open) return;
+  syncViewMenu();
+  placeViewMenu();
+}
+
+el.viewMenuBtn.addEventListener("click", () => {
+  setViewMenuOpen(viewMenu.classList.contains("hidden"));
+});
+
+// The toolbar can be dragged anywhere, so a menu positioned once would end up
+// detached from its button.
+addEventListener("resize", () => {
+  if (!viewMenu.classList.contains("hidden")) placeViewMenu();
+});
+
+// Click anywhere else closes it; the menu is a popover, not a mode.
+document.addEventListener("pointerdown", (e) => {
+  if (viewMenu.classList.contains("hidden")) return;
+  const target = e.target as Node;
+  if (el.viewMenuGroup.contains(target) || viewMenu.contains(target)) return;
+  setViewMenuOpen(false);
+});
+
+el.resetLayout.addEventListener("click", () => {
+  dock.reset();
+  syncViewMenu();
 });
 
 /**
@@ -418,7 +607,7 @@ el.saveCsv.addEventListener("click", () => {
  * log, the same as any command typed by hand.
  */
 async function sendCommand(text: string): Promise<void> {
-  if (streamEffect(text) === "start" && !beginCapture()) return;
+  if (streamEffect(text) === "start" && !(await beginCapture())) return;
   noteCommand(text);
   for (const line of commandSequence(text)) await serial.writeLine(line, term.eol);
 }
@@ -436,11 +625,17 @@ async function sendCommand(text: string): Promise<void> {
  * the user would rather keep it, in which case nothing is sent at all: better
  * to leave the device alone than to start a capture the user just declined.
  */
-function beginCapture(): boolean {
+async function beginCapture(): Promise<boolean> {
   if (charts.unsaved) {
     const n = charts.count.toLocaleString("en-US");
-    if (!confirm(`Starting a new capture discards ${n} samples that have not been saved.\n\n` +
-                 `Discard them?`)) {
+    const ok = await confirmDialog({
+      title: "Discard the current capture?",
+      body: `${n} samples have not been saved to CSV.\n` +
+            `Starting a new capture clears them from the charts.`,
+      confirmLabel: "Discard and start",
+      danger: true,
+    });
+    if (!ok) {
       term.sysLine("Start cancelled - save the CSV first, or clear the charts.", "err");
       return false;
     }

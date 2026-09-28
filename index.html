@@ -14,72 +14,84 @@
   <div id="unsupported-diag" class="diag"></div>
 </div>
 
-<header class="toolbar">
-  <div class="group">
-    <button id="btn-connect" class="primary">Connect</button>
-    <button id="btn-disconnect" disabled>Disconnect</button>
+
+<div id="dock"></div>
+
+<!-- Adopted by the "View" dock panel; see main.ts. Kept in the markup so the
+     ids stay in one place and the panel body is not built in JavaScript. -->
+<template id="tpl-view">
+  <div class="viewbar">
+    <span>window <b id="view-span">--</b></span>
+    <span title="Total capture held in the buffers; this is what the all window frames">history <b id="view-covered">--</b></span>
+    <span>samples <b id="view-samples">0</b></span>
+    <span>avg I <b id="view-avg-i">--</b></span>
+    <span title="Change across the visible range, from the INA228 accumulators">charge <b id="view-charge" class="hw">--</b> <i id="view-total-charge" class="hw"></i></span>
+    <span>avg P <b id="view-avg-p">--</b></span>
+    <span title="Change across the visible range, from the INA228 accumulators">energy <b id="view-energy" class="hw">--</b> <i id="view-total-energy" class="hw"></i></span>
+    <span class="hint">drag to zoom &middot; wheel &middot; shift+wheel or middle-drag to pan &middot; double-click for live</span>
   </div>
+</template>
 
-  <div class="group">
-    <label for="known-ports">Port</label>
-    <select id="known-ports" title="Ports this page has already been granted access to">
-      <option value="">pick on connect...</option>
-    </select>
-    <button id="btn-forget" title="Revoke access to the selected port" disabled>Forget</button>
-  </div>
-
-</header>
-
-<div class="workspace">
-
-  <section class="charts">
-    <div class="toolbar sub">
-      <div class="group">
-        <label for="chart-window">Window</label>
-        <select id="chart-window">
-          <option value="10000">10 s</option>
-          <option value="30000" selected>30 s</option>
-          <option value="60000">1 min</option>
-          <option value="300000">5 min</option>
-          <option value="900000">15 min</option>
-          <option value="0">all</option>
-          <option value="custom">custom</option>
-        </select>
-        <button id="btn-live" class="hidden" title="Resume following live data (or double-click a chart)">Live</button>
-      </div>
-
-      <div class="group checks">
-        <label><input type="checkbox" id="chart-zero"> Y from zero</label>
-        <label><input type="checkbox" id="opt-echo"> Echo samples in terminal</label>
-        <label title="Sends 'acc' once a second and reads the INA228 hardware accumulators. Poll traffic is kept out of the log."><input type="checkbox" id="opt-acc" checked> Poll acc (1 s)</label>
-      </div>
-
-      <div class="group">
-        <button id="btn-clear-charts">Clear charts</button>
-        <button id="btn-save-csv">Export CSV</button>
-      </div>
+<!-- The one panel that cannot be closed: it holds the menu every other panel
+     is reopened from. Draggable like the rest. -->
+<template id="tpl-toolbar">
+  <div class="toolbar panel-bar app-toolbar">
+    <div class="group">
+      <label for="chart-window">Window</label>
+      <select id="chart-window">
+        <option value="10000">10 s</option>
+        <option value="30000" selected>30 s</option>
+        <option value="60000">1 min</option>
+        <option value="300000">5 min</option>
+        <option value="900000">15 min</option>
+        <option value="0">all</option>
+        <option value="custom">custom</option>
+      </select>
+      <button id="btn-live" class="hidden" title="Resume following live data (or double-click a chart)">Live</button>
     </div>
 
-    <div class="viewbar">
-      <span>window <b id="view-span">--</b></span>
-      <span title="Total capture held in the buffers; this is what the all window frames">history <b id="view-covered">--</b></span>
-      <span>samples <b id="view-samples">0</b></span>
-      <span>avg I <b id="view-avg-i">--</b></span>
-      <span title="Change across the visible range, from the INA228 accumulators">charge <b id="view-charge" class="hw">--</b> <i id="view-total-charge" class="hw"></i></span>
-      <span>avg P <b id="view-avg-p">--</b></span>
-      <span title="Change across the visible range, from the INA228 accumulators">energy <b id="view-energy" class="hw">--</b> <i id="view-total-energy" class="hw"></i></span>
-      <span class="hint">drag to zoom &middot; wheel &middot; shift+wheel or middle-drag to pan &middot; double-click for live</span>
+    <div class="group checks">
+      <label><input type="checkbox" id="chart-zero"> Y from zero</label>
+      <label><input type="checkbox" id="opt-echo"> Echo samples in terminal</label>
+      <label title="Sends 'acc' once a second and reads the INA228 hardware accumulators. Poll traffic is kept out of the log."><input type="checkbox" id="opt-acc" checked> Poll acc (1 s)</label>
     </div>
 
-    <div id="chart-grid"></div>
-  </section>
+    <div class="group">
+      <button id="btn-clear-charts">Clear charts</button>
+      <button id="btn-save-csv">Export CSV</button>
+    </div>
 
-  <div id="splitter" class="splitter" role="separator" aria-orientation="vertical"
-       tabindex="0" title="Drag to resize. Double-click to reset, arrow keys to nudge."></div>
+    <div class="group" id="view-menu-group">
+      <button id="btn-view-menu" aria-haspopup="true" aria-expanded="false"
+              title="Show or hide panels">Panels</button>
+      <button id="btn-reset-layout" title="Back to the default arrangement">Reset layout</button>
+    </div>
+  </div>
+</template>
 
+<template id="tpl-connect">
+  <div class="toolbar panel-bar">
+    <div class="group">
+      <button id="btn-connect" class="primary">Connect</button>
+      <button id="btn-disconnect" disabled>Disconnect</button>
+    </div>
+
+    <div class="group">
+      <label for="known-ports">Port</label>
+      <select id="known-ports" title="Ports this page has already been granted access to">
+        <option value="">pick on connect...</option>
+      </select>
+      <button id="btn-forget" title="Revoke access to the selected port" disabled>Forget</button>
+    </div>
+  </div>
+</template>
+
+<template id="tpl-controls">
+  <div id="pane-control" class="controls"></div>
+</template>
+
+<template id="tpl-terminal">
   <section class="terminal">
-    <div id="pane-control" class="controls"></div>
-
     <div class="toolbar sub">
       <div class="group">
         <label for="mode">View</label>
@@ -117,8 +129,7 @@
          lives at the bottom of the log. -->
     <main id="output" tabindex="0"></main>
   </section>
-
-</div>
+</template>
 
 <div class="status">
   <span id="stat-state" class="dot off">disconnected</span>

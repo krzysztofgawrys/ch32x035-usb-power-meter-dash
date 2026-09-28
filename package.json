@@ -9,9 +9,11 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "dockview:css": "node scripts/extract-dockview-css.mjs"
   },
   "dependencies": {
+    "dockview-core": "^8.3.1",
     "uplot": "^1.6.32"
   },
   "devDependencies": {

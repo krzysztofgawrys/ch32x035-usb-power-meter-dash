@@ -17,6 +17,7 @@
 
 import { beforeAll, describe, expect, it } from "vitest";
 import { ChartPanel } from "./charts.js";
+import { METRICS } from "./store.js";
 
 /** A 2D context that accepts every call and returns something harmless. */
 function stubContext(): CanvasRenderingContext2D {
@@ -57,7 +58,6 @@ function build() {
   sized(host, 900, 600);
 
   const panel = new ChartPanel({
-    host,
     windowSelect: document.getElementById("win") as HTMLSelectElement,
     zeroCheck: document.getElementById("zero") as HTMLInputElement,
     countEl: document.getElementById("count") as HTMLElement,
@@ -75,7 +75,13 @@ function build() {
     accBackwardsN: document.getElementById("abn") as HTMLElement,
   });
 
-  // uPlot measures its plot boxes; give every one a size.
+  // Charts are built detached now - each one is adopted by its own dock panel
+  // in the app, so the test plays the part of the dock and mounts them.
+  for (const m of METRICS) host.appendChild(panel.chartElement(m.key)!);
+
+  // uPlot measures its plot boxes; give every one a size. This also stands in
+  // for being laid out at all: a chart whose plot box reports zero is treated
+  // as hidden and neither resized nor drawn.
   for (const plot of document.querySelectorAll<HTMLElement>(".plot")) sized(plot, 900, 140);
   // The overlay is what pointer gestures are measured against.
   for (const over of document.querySelectorAll<HTMLElement>(".u-over")) sized(over, 800, 120);
