@@ -23,15 +23,18 @@ export const DEFAULT_LAYOUT: SerializedDockview = {
     root: {
       type: "branch",
       data: [
-        // Left column: the figures strip, then the four charts.
+        // Left column: the figures strip, then the four charts at one quarter
+        // each of what is left (1242 - 54 = 1188). Dock.equalise() redoes this
+        // against the real window, but starting level means the first paint
+        // does not jump.
         {
           type: "branch",
           data: [
             { type: "leaf", data: { views: ["stats"], activeView: "stats", id: "16" }, size: 54 },
-            { type: "leaf", data: { views: ["v"], activeView: "v", id: "10" }, size: 213 },
-            { type: "leaf", data: { views: ["i"], activeView: "i", id: "13" }, size: 100 },
-            { type: "leaf", data: { views: ["p"], activeView: "p", id: "14" }, size: 100 },
-            { type: "leaf", data: { views: ["s"], activeView: "s", id: "15" }, size: 775 },
+            { type: "leaf", data: { views: ["v"], activeView: "v", id: "10" }, size: 297 },
+            { type: "leaf", data: { views: ["i"], activeView: "i", id: "13" }, size: 297 },
+            { type: "leaf", data: { views: ["p"], activeView: "p", id: "14" }, size: 297 },
+            { type: "leaf", data: { views: ["s"], activeView: "s", id: "15" }, size: 297 },
           ],
           size: 1608,
         },

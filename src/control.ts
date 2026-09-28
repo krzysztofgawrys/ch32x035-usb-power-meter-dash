@@ -14,6 +14,7 @@ const CONFIRM_MS = 3000;
 
 export class ControlPanel {
   private readonly interactive: (HTMLButtonElement | HTMLSelectElement)[] = [];
+  private readonly selects = new Map<string, HTMLSelectElement>();
 
   /** Set by the owner; sends a command line to the device. */
   onCommand: (command: string) => void = () => {};
@@ -49,8 +50,9 @@ export class ControlPanel {
       span.textContent = control.label;
       const select = document.createElement("select");
       select.id = `cmd-${control.id}`;
-      // A placeholder so choosing the first real option still fires a change,
-      // and so the control never claims to know the device's current setting.
+      // Shown only until the device says what it is actually set to; see
+      // setValue() and src/settings.ts. It stays selectable for a control the
+      // device never reports, where claiming a value would be a guess.
       const placeholder = document.createElement("option");
       placeholder.value = "";
       placeholder.textContent = "...";
@@ -63,11 +65,14 @@ export class ControlPanel {
       }
       select.addEventListener("change", () => {
         if (!select.value) return;
+        // Left showing the chosen value rather than snapped back to the
+        // placeholder: the device is about to be asked to confirm it anyway,
+        // and a control that forgets what you just picked reads as a failure.
         this.onCommand(selectCommand(control, select.value));
-        select.value = "";
       });
       wrap.append(span, select);
       this.interactive.push(select);
+      this.selects.set(control.id, select);
       return wrap;
     }
 
@@ -105,6 +110,24 @@ export class ControlPanel {
 
     this.interactive.push(button);
     return button;
+  }
+
+  /**
+   * Shows what the device reported, if it is one of the offered options.
+   *
+   * Silently ignores anything else - a device on custom settings should keep
+   * the placeholder rather than have a value invented for it.
+   */
+  setValue(id: string, value: string): void {
+    const select = this.selects.get(id);
+    if (!select) return;
+    if (![...select.options].some((o) => o.value === value)) return;
+    select.value = value;
+  }
+
+  /** Back to "..." everywhere: nothing is known about a disconnected device. */
+  clearValues(): void {
+    for (const select of this.selects.values()) select.value = "";
   }
 
   setEnabled(on: boolean): void {

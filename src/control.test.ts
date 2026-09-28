@@ -70,16 +70,47 @@ describe("ControlPanel", () => {
     expect(sent).toEqual(["start"]);
   });
 
-  it("sends the argument form from a select and resets it", () => {
+  it("sends the argument form from a select and keeps showing it", () => {
     const { panel, sent } = build();
     panel.setEnabled(true);
     const avg = document.getElementById("cmd-avg") as HTMLSelectElement;
     avg.value = "256";
     avg.dispatchEvent(new Event("change"));
     expect(sent).toEqual(["avg 256"]);
-    // Back to the placeholder: the control must not claim to know the device's
-    // current setting, which it has no way to read.
-    expect(avg.value).toBe("");
+    // It used to snap back to the placeholder, on the grounds that the app
+    // could not know what the device was set to. It can now - it asks - and a
+    // control that forgets what you just picked reads as a failure.
+    expect(avg.value).toBe("256");
+  });
+
+  describe("setValue", () => {
+    it("shows what the device reported", () => {
+      const { panel } = build();
+      panel.setValue("avg", "512");
+      expect((document.getElementById("cmd-avg") as HTMLSelectElement).value).toBe("512");
+    });
+
+    /* A device on a hand-rolled config should keep "..." rather than have a
+       value invented for it. */
+    it("ignores a value that is not on offer", () => {
+      const { panel } = build();
+      panel.setValue("avg", "7");
+      expect((document.getElementById("cmd-avg") as HTMLSelectElement).value).toBe("");
+    });
+
+    it("ignores an unknown control", () => {
+      const { panel } = build();
+      expect(() => panel.setValue("nope", "x")).not.toThrow();
+    });
+
+    it("clears back to the placeholder, since a closed port tells us nothing", () => {
+      const { panel } = build();
+      panel.setValue("avg", "512");
+      panel.setValue("mode", "fast");
+      panel.clearValues();
+      expect((document.getElementById("cmd-avg") as HTMLSelectElement).value).toBe("");
+      expect((document.getElementById("cmd-mode") as HTMLSelectElement).value).toBe("");
+    });
   });
 
   /**

@@ -110,6 +110,14 @@ export interface DockOptions {
   host: HTMLElement;
   panels: readonly PanelSpec[];
   defaultLayout: DefaultLayout;
+  /**
+   * Panels that should start out the same height as each other.
+   *
+   * Applied only when the layout comes from the default, never afterwards -
+   * a height the user dragged is a decision, and re-levelling it would undo
+   * their work every time the window changed.
+   */
+  equalHeight?: readonly string[];
   storage?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | null;
 }
 
@@ -117,6 +125,8 @@ export class Dock {
   readonly api: DockviewApi;
   private readonly specs = new Map<string, PanelSpec>();
   private saveTimer = 0;
+  /** True when this session started from the default rather than a saved layout. */
+  private usedDefault = false;
 
   /** Called after any change to which panels are open. */
   onVisibilityChange: () => void = () => {};
@@ -143,7 +153,8 @@ export class Dock {
       panel.api.onDidDimensionsChange(() => this.scheduleSave());
     });
 
-    if (!this.restore()) this.reset();
+    this.usedDefault = !this.restore();
+    if (this.usedDefault) this.reset();
 
     /*
      * Nothing above this point knows how big the dock is: dockview learns its
@@ -155,6 +166,9 @@ export class Dock {
       if (!(this.api.width > 0 && this.api.height > 0)) return;
       settle.disconnect();
       this.pinAll(true);
+      // Only for a fresh default: a restored layout carries heights the user
+      // chose, and levelling them here would throw that away on every load.
+      if (this.usedDefault) this.equalise();
       this.save();
     });
     settle.observe(opts.host);
@@ -231,6 +245,34 @@ export class Dock {
     if (resize && height !== undefined) panel.group.api.setSize({ height });
   }
 
+  /**
+   * Shares the charts' space out evenly between them.
+   *
+   * Deliberately expressed as "divide what these already occupy", not "take
+   * the window, subtract the strips, divide by four". The two give the same
+   * answer while the charts are stacked together, and the first keeps giving
+   * a sensible one after a panel is closed, popped out, or dragged elsewhere
+   * - it never has to know what else is on screen.
+   */
+  private equalise(): void {
+    const ids = this.opts.equalHeight ?? [];
+    if (ids.length < 2 || !(this.api.height > 0)) return;
+
+    const groups = ids
+      .map((id) => this.api.getPanel(id)?.group)
+      .filter((g): g is NonNullable<typeof g> => !!g);
+    // Only when each one is alone in its own group and they are all open;
+    // anything else and "equal height" no longer means what it says.
+    if (groups.length !== ids.length) return;
+    if (new Set(groups.map((g) => g.id)).size !== groups.length) return;
+    if (groups.some((g) => g.panels.length !== 1)) return;
+
+    const total = groups.reduce((sum, g) => sum + g.api.height, 0);
+    const each = Math.floor(total / groups.length);
+    if (each < 1) return;
+    for (const g of groups) g.api.setSize({ height: each });
+  }
+
   private pinAll(resize: boolean): void {
     for (const spec of this.specs.values()) {
       if (!spec.constraints) continue;
@@ -300,6 +342,7 @@ export class Dock {
     // which is well above a one-line strip - that is the growth.
     this.pinned.clear();
     this.pinAll(true);
+    this.equalise();
     // The default is the last line of defence, so a mistake in it has nowhere
     // to fall back to - it has to be noisy instead. This fires when a panel is
     // renamed and src/default-layout.ts is not updated with it.

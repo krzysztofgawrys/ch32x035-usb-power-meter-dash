@@ -8,6 +8,7 @@ import { METRICS } from "./store.js";
 import { commandSequence, streamEffect } from "./commands.js";
 import { ControlPanel } from "./control.js";
 import { confirmDialog } from "./dialog.js";
+import { QUERY_COMMANDS, parseSetting, refreshFor } from "./settings.js";
 import { DEFAULT_LAYOUT } from "./default-layout.js";
 import { Dock, type PanelSpec } from "./dock.js";
 import { SampleScanner } from "./parse.js";
@@ -179,6 +180,9 @@ const dock = new Dock({
   panels: PANELS,
   storage: globalThis.localStorage,
   defaultLayout: (api) => api.fromJSON(DEFAULT_LAYOUT),
+  // The four charts share whatever the strips leave, evenly - until the user
+  // drags one, which is then left alone.
+  equalHeight: METRICS.map((m) => m.key),
 });
 
 /**
@@ -305,6 +309,7 @@ const scanner = new SampleScanner(
     charts.addAcc(t, acc.charge, acc.energy);
   },
   (line) => {
+    applySettings(line);
     if (deviceName || !serial.isOpen) return;
     const text = line.replace(/^[\s>]+/, "").trim();
     // Skip a bare prompt or a command echo; take the first line with substance.
@@ -313,6 +318,30 @@ const scanner = new SampleScanner(
     el.statPort.textContent = `${text}  (${portLabelText})`;
   },
 );
+
+/**
+ * Mirrors the device's reported settings into the control panel dropdowns.
+ *
+ * The ids differ from the field names in one place: the I2C control is
+ * "i2c-backend" because "i2c" is already the command.
+ */
+function applySettings(line: string): void {
+  const found = parseSetting(line);
+  if (!found) return;
+  if (found.mode) control.setValue("mode", found.mode);
+  if (found.avg) control.setValue("avg", found.avg);
+  if (found.range) control.setValue("range", found.range);
+  if (found.lcd) control.setValue("lcd", found.lcd);
+  if (found.i2c) control.setValue("i2c-backend", found.i2c);
+}
+
+/** Asks the device to state its settings. Quiet: three lines nobody typed. */
+function querySettings(only?: string): void {
+  if (!serial.isOpen) return;
+  for (const cmd of only ? [only] : QUERY_COMMANDS) {
+    void serial.writeLine(cmd, term.eol, true);
+  }
+}
 
 /**
  * Polls the device's hardware accumulators.
@@ -438,6 +467,13 @@ function setConnectedUI(on: boolean): void {
   el.statState.textContent = on ? "connected" : "disconnected";
   term.setPromptEnabled(on);
   control.setEnabled(on);
+  if (on) {
+    // Give the greeting a moment to finish, then ask what the device is set
+    // to. Until the answers arrive the dropdowns keep showing "...".
+    setTimeout(() => querySettings(), 300);
+  } else {
+    control.clearValues();
+  }
 }
 
 let statsFrame = 0;
@@ -610,6 +646,10 @@ async function sendCommand(text: string): Promise<void> {
   if (streamEffect(text) === "start" && !(await beginCapture())) return;
   noteCommand(text);
   for (const line of commandSequence(text)) await serial.writeLine(line, term.eol);
+  // Commands that change a setting but only answer "OK" have to be read back,
+  // or the dropdown would keep showing the value from before the change.
+  const refresh = refreshFor(text);
+  if (refresh) setTimeout(() => querySettings(refresh), 150);
 }
 
 /**
